@@ -23,7 +23,7 @@ const (
 	NR_VEC                    = 1024       // number of vectors to store in a bucket
 	NR_BUCKETS                = 1024       // number of buckets stored in a partition
 	NR_PARTITIONS             = 512        // number of partitions
-	NR_LINE_GOROUTINES        = 512        // number of partitions
+	NR_LINE_GOROUTINES        = 1024       // number of partitions
 	NULL_VAL           uint32 = 4294967295 // (2^32)-1
 )
 
@@ -68,8 +68,7 @@ var PARS [][]PartitionTuple
 
 var VecId uint32
 
-var lineChannel = make(chan Line, 1024*NR_LINE_GOROUTINES)
-var vectChannel = make(chan Vector, 1024*NR_LINE_GOROUTINES)
+var lineChannel = make(chan Line, NR_LINE_GOROUTINES/2)
 
 var prod_wg sync.WaitGroup
 var cons_wg sync.WaitGroup
@@ -232,10 +231,13 @@ func getIn() {
 
 // reads lines from in, parses them to Vector and sends to out
 // until either in or done is closed.
-func parseLine() {
+func parseLine(partChans []chan Vector) {
 	defer cons_wg.Done()
 	for l := range lineChannel {
-		vectChannel <- Vector{l.id, parseToVec(l.line)}
+		vec := Vector{l.id, parseToVec(l.line)}
+		for i, _ := range partChans {
+			partChans[i] <- vec
+		}
 	}
 }
 
@@ -253,11 +255,11 @@ func main() {
 	// 2^[0:NR_DIM]: [1, 2, 4, 8, ..., 512]
 	POWS = getPowers()
 
-	partChans := make([]chan Vector, NR_LINE_GOROUTINES)
+	partChans := make([]chan Vector, NR_PARTITIONS)
 	for i, _ := range partChans {
 		// The size of the channels buffer controls how far behind the recievers
 		// of the fanOut channels can lag the other channels.
-		partChans[i] = make(chan Vector, 1024*NR_LINE_GOROUTINES) //, lag
+		partChans[i] = make(chan Vector, NR_LINE_GOROUTINES/2) //, lag
 		part_wg.Add(1)
 		go partition(partChans[i], i, PARS[i], out)
 	}
@@ -267,7 +269,7 @@ func main() {
 
 	for c := 0; c < NR_LINE_GOROUTINES; c++ {
 		cons_wg.Add(1)
-		go parseLine()
+		go parseLine(partChans)
 	}
 
 	go func() {
@@ -277,22 +279,9 @@ func main() {
 
 	go func() {
 		cons_wg.Wait()
-		close(vectChannel)
-	}()
-
-	part_wg.Add(1)
-	go func() {
-		for v := range vectChannel {
-			for i, _ := range partChans {
-				partChans[i] <- v
-			}
-		}
-
 		for i, _ := range partChans {
 			close(partChans[i])
 		}
-
-		part_wg.Done()
 	}()
 
 	part_wg.Wait()
